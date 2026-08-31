@@ -119,6 +119,26 @@ jobs:
               });
             }
 
+            async function updateStaleBranch(fresh, headSha) {
+              if (fresh.head.repo?.full_name !== `${owner}/${repo}`) {
+                core.info(`#${fresh.number}: stale fork PR cannot be updated automatically.`);
+                return false;
+              }
+              try {
+                const response = await github.rest.pulls.updateBranch({
+                  owner,
+                  repo,
+                  pull_number: fresh.number,
+                  expected_head_sha: headSha,
+                });
+                core.info(`#${fresh.number}: stale branch queued for safe update to main ${mainSha}: ${response.data.message}`);
+                return true;
+              } catch (error) {
+                core.warning(`#${fresh.number}: automatic branch update unavailable; waiting without bypass. ${error.message}`);
+                return false;
+              }
+            }
+
             for (const candidate of pulls.sort((a, b) => a.number - b.number)) {
               const fresh = (await github.rest.pulls.get({ owner, repo, pull_number: candidate.number })).data;
               const labels = new Set((fresh.labels || []).map(label => label.name));
@@ -127,7 +147,7 @@ jobs:
 
               const headSha = fresh.head.sha;
               if (!(await containsCurrentMain(headSha))) {
-                core.info(`#${fresh.number}: stale against current main; waiting for updated branch.`);
+                await updateStaleBranch(fresh, headSha);
                 continue;
               }
 
