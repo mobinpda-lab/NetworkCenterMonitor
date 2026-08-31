@@ -9,6 +9,8 @@ import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Dao
 abstract class CanonicalDao {
@@ -44,6 +46,9 @@ abstract class CanonicalDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun upsertCustomFields(values: List<CustomFieldValueEntity>)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    abstract suspend fun upsertCustomFieldDefinition(value: CustomFieldDefinitionEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     abstract suspend fun upsertCameraProfile(value: CameraProfileEntity)
@@ -95,6 +100,27 @@ abstract class CanonicalDao {
 
     @Query("SELECT * FROM custom_field_values WHERE ownerType = 'DEVICE' AND ownerId = :deviceId ORDER BY fieldKey")
     abstract suspend fun getDeviceCustomFields(deviceId: String): List<CustomFieldValueEntity>
+
+    @Query("SELECT * FROM custom_field_definitions ORDER BY sortOrder, title, id")
+    abstract suspend fun getCustomFieldDefinitions(): List<CustomFieldDefinitionEntity>
+
+    @Query("SELECT * FROM custom_field_definitions WHERE enabled = 1 ORDER BY sortOrder, title, id")
+    abstract suspend fun getEnabledCustomFieldDefinitions(): List<CustomFieldDefinitionEntity>
+
+    @Query("UPDATE custom_field_definitions SET enabled = 0 WHERE id = :definitionId")
+    abstract suspend fun archiveCustomFieldDefinition(definitionId: String): Int
+
+    @Query("SELECT COUNT(*) FROM custom_field_values WHERE fieldKey = :definitionId")
+    abstract suspend fun countCustomFieldValues(definitionId: String): Int
+
+    @Query("DELETE FROM custom_field_definitions WHERE id = :definitionId")
+    protected abstract suspend fun hardDeleteCustomFieldDefinitionUnchecked(definitionId: String): Int
+
+    @Transaction
+    open suspend fun hardDeleteUnusedCustomFieldDefinition(definitionId: String): Boolean {
+        if (countCustomFieldValues(definitionId) != 0) return false
+        return hardDeleteCustomFieldDefinitionUnchecked(definitionId) == 1
+    }
 
     @Query("SELECT * FROM sourced_fields WHERE ownerType = 'DEVICE' AND ownerId = :deviceId ORDER BY fieldKey")
     abstract suspend fun getDeviceSourcedFields(deviceId: String): List<SourcedFieldEntity>
@@ -157,6 +183,7 @@ data class PersistedDeviceAggregate(
         SourcedFieldEntity::class,
         DeviceTagEntity::class,
         CustomFieldValueEntity::class,
+        CustomFieldDefinitionEntity::class,
         CameraProfileEntity::class,
         RecorderProfileEntity::class,
         PcProfileEntity::class,
@@ -166,7 +193,7 @@ data class PersistedDeviceAggregate(
         FollowUpEntity::class,
         MonitoringStateEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 abstract class NcmDatabase : RoomDatabase() {
@@ -175,10 +202,30 @@ abstract class NcmDatabase : RoomDatabase() {
     companion object {
         const val DATABASE_NAME = "network-center-monitor.db"
 
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `custom_field_definitions` (
+                        `id` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `dataType` TEXT NOT NULL,
+                        `sortOrder` INTEGER NOT NULL,
+                        `required` INTEGER NOT NULL,
+                        `enabled` INTEGER NOT NULL,
+                        `description` TEXT,
+                        `selectOptions` TEXT NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
         fun build(context: Context): NcmDatabase = Room.databaseBuilder(
             context.applicationContext,
             NcmDatabase::class.java,
             DATABASE_NAME,
-        ).build()
+        ).addMigrations(MIGRATION_1_2).build()
     }
 }
