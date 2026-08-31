@@ -90,10 +90,19 @@ data class IpEndpoint(
     val id: IpEndpointId,
     val centerId: CenterId,
     val address: Ipv4Address,
+    val networkId: NetworkId? = null,
+    val deviceId: DeviceId? = null,
+    val deviceInterfaceId: DeviceInterfaceId? = null,
     val monitoringEnabled: Boolean = true,
     val pingEnabled: Boolean = true,
     val asset: AssetMetadata = AssetMetadata(),
-)
+) {
+    init {
+        require(deviceInterfaceId == null || deviceId != null) {
+            "A device interface cannot be linked without its device"
+        }
+    }
+}
 
 data class MonitoredService(
     val id: ServiceId,
