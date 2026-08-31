@@ -12,8 +12,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  secret-scan:
-    name: secret-scan
+  security-gate:
+    name: security-gate
     runs-on: ubuntu-latest
     env:
       EVIDENCE_SHA: ${{ github.event.pull_request.head.sha }}
@@ -29,12 +29,5 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  dependency-review:
-    name: dependency-review
-    runs-on: ubuntu-latest
-    steps:
-      - name: Review dependency changes
-        uses: actions/dependency-review-action@v4
-        with:
-          fail-on-severity: high
+      - name: Verify Android security baseline
+        run: python3 scripts/security_baseline_check.py
