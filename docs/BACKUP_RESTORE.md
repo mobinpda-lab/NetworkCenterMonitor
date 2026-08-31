@@ -18,4 +18,6 @@ Backup archives are encrypted with AES-GCM. The encryption key is supplied by se
 ## Coverage gate
 Every new durable entity must update both the persistence registry and canonical backup coverage in the same implementation cycle. Backup/Restore is part of Definition of Done, not a later export feature.
 
+`BackupSection.CUSTOM_FIELDS` is the single canonical section for both custom-field definitions and custom-field values. Schema v2 adds `custom_field_definitions`; its definition metadata and all `custom_field_values` must be serialized/restored together in this section. No second custom-field export path is permitted.
+
 Database integration is completed against the canonical Room schema from DATA-033; no second database or backup path is allowed.
