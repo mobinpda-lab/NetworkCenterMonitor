@@ -68,7 +68,7 @@ class DevicePersistenceMapperTest {
         val required = setOf(
             "centers", "networks", "devices", "device_interfaces", "interface_ips",
             "ip_endpoints", "services", "device_relations", "sourced_fields", "device_tags",
-            "custom_field_values", "camera_profiles", "recorder_profiles", "pc_profiles",
+            "custom_field_definitions", "custom_field_values", "camera_profiles", "recorder_profiles", "pc_profiles",
             "remote_profiles", "local_agents", "incidents", "follow_ups", "monitoring_state",
         )
         assertEquals(required, CanonicalPersistenceTables.names)
