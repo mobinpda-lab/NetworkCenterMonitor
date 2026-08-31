@@ -126,12 +126,11 @@ class DiscoveryExecutor(
                         for (target in queue) {
                             if (!controller.awaitRunnable()) break
 
-                            val targetObservations = buildList {
-                                for (adapter in selectedAdapters) {
-                                    if (!controller.awaitRunnable()) break
-                                    limiter.acquire()
-                                    add(runWithRetry(adapter, target, request))
-                                }
+                            val targetObservations = mutableListOf<ProbeObservation>()
+                            for (adapter in selectedAdapters) {
+                                if (!controller.awaitRunnable()) break
+                                limiter.acquire()
+                                targetObservations += runWithRetry(adapter, target, request)
                             }
 
                             observationLock.withLock {
