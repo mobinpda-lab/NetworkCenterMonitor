@@ -29,7 +29,8 @@ data class CustomFieldDefinition(
             "Select options are only valid for SELECT custom fields"
         }
         if (dataType == CustomFieldDataType.SELECT) {
-            require(selectOptions.map(String::trim).filter(String::isNotEmpty).distinct().size == selectOptions.size) {
+            val normalizedOptions = selectOptions.map { it.trim() }
+            require(normalizedOptions.all { it.isNotEmpty() } && normalizedOptions.distinct().size == normalizedOptions.size) {
                 "SELECT options must be non-blank and unique"
             }
         }
