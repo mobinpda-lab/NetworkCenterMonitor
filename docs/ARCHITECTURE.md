@@ -1,0 +1,13 @@
+# Architecture Baseline
+- Android: Kotlin + Jetpack Compose
+- Local database: Room
+- Async/state: Coroutines + Flow
+- Active monitoring: Foreground Service
+- Probe scheduler: bounded concurrency + Queue/Batch + Timeout/Retry/Backoff
+- Architecture: Local-first, Server-ready
+- Canonical hierarchy: Group/Province -> Center -> IP -> Service/Port -> Incident -> Follow-up
+- Monitoring settings inheritance: Global -> Group -> Center -> IP -> Service
+- Ping/ICMP and Port Check remain independent
+- Backup/Restore must serialize the complete canonical state, settings, custom fields, history and attachments
+- Reports must use Jalali date/time and Vazirmatn UI FD with embedded font
+- Avoid parallel Settings/Font/Backup/Monitoring/Report controllers; each concern has one canonical path
