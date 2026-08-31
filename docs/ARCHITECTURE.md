@@ -86,5 +86,18 @@ For every material code change, review and update as applicable:
 
 A feature must not be marked complete if its implementation and its GitHub documentation disagree.
 
+## Production automation architecture
+- `Android CI` is the quality/unit/lint/build gate and must validate the exact PR head.
+- `Android Device Smoke` is the executable gate: build APK, install on an emulator, launch the real app and retain runtime evidence.
+- `Android Security` is an independent security gate for promotable PR heads.
+- `NCM Production Orchestrator` is the only GitHub-native automated production-promotion authority.
+- The Orchestrator wakes on gate completion, manual dispatch and a five-minute fallback schedule.
+- Only explicitly opted-in PRs are eligible (`ncm-auto` label or `NCM-AUTO: TRUE` marker).
+- Every required gate must be completed successfully on the exact current PR head and current `main` base; running, failed, cancelled or skipped evidence is not success.
+- `main`, PR head, draft state and mergeability are re-read immediately before promotion.
+- Production merges are serialized: at most one merge per Orchestrator invocation, forcing remaining work to revalidate against the new `main`.
+- Failed/timed-out gates create an idempotent recovery queue issue; recovery work must produce new exact-head evidence before promotion.
+- No automation may force-push, rewrite history, bypass a broken gate, create a second production merge authority or store credentials in repository content/logs.
+
 ## Non-parallel architecture rule
 Avoid parallel Settings, Font, Backup, Monitoring, Incident, Report, Discovery, Device, Camera or PC controllers/data stores. Each concern has one canonical path and specialized behavior is implemented through profiles/adapters/extensions.
