@@ -1,0 +1,176 @@
+name: NCM Production Orchestrator
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/production-orchestrator.yml'
+      - 'scripts/check_production_orchestrator.py'
+  workflow_run:
+    workflows: ['Android CI', 'Android Device Smoke', 'Android Security']
+    types: [completed]
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Optional opted-in PR to evaluate
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+  issues: write
+
+concurrency:
+  group: ncm-production-orchestrator
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: orchestrator-contract
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify exact checked-out SHA
+        run: test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+      - name: Verify orchestrator safety contract
+        run: python3 scripts/check_production_orchestrator.py
+
+  orchestrate:
+    name: guarded-promotion
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Evaluate exact-head production candidates
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const requestedPr = Number(context.payload.inputs?.pr_number || 0);
+            const AUTO_LABEL = 'ncm-auto';
+            const AUTO_MARKER = 'NCM-AUTO: TRUE';
+            const REQUIRED = ['Android CI', 'Android Device Smoke', 'Android Security'];
+
+            const main = await github.rest.repos.getBranch({ owner, repo, branch: 'main' });
+            const mainSha = main.data.commit.sha;
+            core.info(`Current main: ${mainSha}`);
+
+            let pulls;
+            if (requestedPr) {
+              const response = await github.rest.pulls.get({ owner, repo, pull_number: requestedPr });
+              pulls = [response.data];
+            } else {
+              pulls = await github.paginate(github.rest.pulls.list, {
+                owner, repo, state: 'open', base: 'main', per_page: 100,
+              });
+            }
+
+            async function containsCurrentMain(headSha) {
+              const comparison = await github.rest.repos.compareCommitsWithBasehead({
+                owner, repo, basehead: `${mainSha}...${headSha}`,
+              });
+              return comparison.data.merge_base_commit?.sha === mainSha;
+            }
+
+            async function runsForHead(headSha) {
+              return github.paginate(github.rest.actions.listWorkflowRunsForRepo, {
+                owner, repo, head_sha: headSha, per_page: 100,
+              });
+            }
+
+            function latestNamed(runs, name) {
+              return runs.filter(run => run.name === name).sort((a, b) => b.id - a.id)[0] || null;
+            }
+
+            function pullRunMatchesCurrentBase(run, prNumber) {
+              if (run?.event !== 'pull_request') return false;
+              const linked = (run.pull_requests || []).find(p => p.number === prNumber);
+              return linked?.base?.sha === mainSha;
+            }
+
+            async function gateIsExactAndGreen(run, prNumber, headSha) {
+              if (!run || run.head_sha !== headSha) return false;
+              if (run.status !== 'completed' || run.conclusion !== 'success') return false;
+              if (run.event === 'pull_request') return pullRunMatchesCurrentBase(run, prNumber);
+              if (run.event === 'workflow_dispatch') return containsCurrentMain(headSha);
+              return false;
+            }
+
+            async function queueFailureIssue(run, prNumber, headSha) {
+              if (!run || run.status !== 'completed' || !['failure', 'timed_out'].includes(run.conclusion)) return;
+              const shortSha = headSha.slice(0, 12);
+              const title = `[Auto-Fix] ${run.name} failed on ${shortSha}`;
+              const existing = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${owner}/${repo} is:issue is:open in:title \"${title}\"`,
+                per_page: 10,
+              });
+              if (existing.data.total_count > 0) return;
+              await github.rest.issues.create({
+                owner, repo, title,
+                body: `Automatic recovery queue entry for PR #${prNumber}.\n\nWorkflow: ${run.name}\nHead: ${headSha}\nRun: ${run.html_url}\nConclusion: ${run.conclusion}\n\nDo not merge until a new exact-head successful run replaces this evidence.`,
+                labels: ['automation'],
+              });
+            }
+
+            for (const candidate of pulls.sort((a, b) => a.number - b.number)) {
+              const fresh = (await github.rest.pulls.get({ owner, repo, pull_number: candidate.number })).data;
+              const labels = new Set((fresh.labels || []).map(label => label.name));
+              const optedIn = labels.has(AUTO_LABEL) || String(fresh.body || '').includes(AUTO_MARKER);
+              if (!optedIn || fresh.state !== 'open' || fresh.base.ref !== 'main') continue;
+
+              const headSha = fresh.head.sha;
+              if (!(await containsCurrentMain(headSha))) {
+                core.info(`#${fresh.number}: stale against current main; waiting for updated branch.`);
+                continue;
+              }
+
+              const runs = await runsForHead(headSha);
+              const gates = Object.fromEntries(REQUIRED.map(name => [name, latestNamed(runs, name)]));
+              let allGreen = true;
+              for (const name of REQUIRED) {
+                const run = gates[name];
+                const green = await gateIsExactAndGreen(run, fresh.number, headSha);
+                if (!green) {
+                  allGreen = false;
+                  await queueFailureIssue(run, fresh.number, headSha);
+                  core.info(`#${fresh.number}: ${name} not exact-head green; no promotion.`);
+                }
+              }
+              if (!allGreen) continue;
+
+              if (fresh.draft) {
+                core.info(`#${fresh.number}: all gates green; marking ready for review.`);
+                await github.graphql(`
+                  mutation($id: ID!) {
+                    markPullRequestReadyForReview(input: {pullRequestId: $id}) {
+                      pullRequest { number isDraft }
+                    }
+                  }
+                `, { id: fresh.node_id });
+              }
+
+              const beforeMergeMain = await github.rest.repos.getBranch({ owner, repo, branch: 'main' });
+              if (beforeMergeMain.data.commit.sha !== mainSha) {
+                core.warning('main moved during validation; aborting this invocation.');
+                return;
+              }
+
+              const locked = (await github.rest.pulls.get({ owner, repo, pull_number: fresh.number })).data;
+              if (locked.state !== 'open' || locked.head.sha !== headSha || locked.draft || locked.mergeable !== true) {
+                core.info(`#${fresh.number}: PR changed or is not mergeable; no merge.`);
+                continue;
+              }
+
+              core.info(`#${fresh.number}: exact-head CI/Device/Security green on current main; squash merging.`);
+              await github.rest.pulls.merge({
+                owner, repo, pull_number: fresh.number, merge_method: 'squash', sha: headSha,
+              });
+              return; // serial production promotion: one merge per invocation
+            }
