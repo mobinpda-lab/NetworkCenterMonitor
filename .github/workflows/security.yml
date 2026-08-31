@@ -1,0 +1,33 @@
+name: Android Security
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: android-security-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  security-gate:
+    name: security-gate
+    runs-on: ubuntu-latest
+    env:
+      EVIDENCE_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EVIDENCE_SHA }}
+          fetch-depth: 0
+      - name: Verify exact checked-out SHA
+        run: test "$(git rev-parse HEAD)" = "$EVIDENCE_SHA"
+      - name: Scan repository for secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify Android security baseline
+        run: python3 scripts/security_baseline_check.py
