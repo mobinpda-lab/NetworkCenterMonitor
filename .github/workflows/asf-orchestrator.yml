@@ -1,0 +1,35 @@
+name: ASF Orchestrator
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
+
+jobs:
+  asf-cycle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check project state
+        run: |
+          test -f docs/PROJECT_STATE.md || echo "PROJECT_STATE.md missing"
+
+      - name: Check roadmap queue
+        run: |
+          test -f docs/ROADMAP_QUEUE.md || echo "ROADMAP_QUEUE.md missing"
+
+      - name: Select task placeholder
+        run: echo "ASF task selection initialized"
+
+      - name: Validate
+        run: echo "ASF validation initialized"
+
+      - name: Collect evidence
+        run: |
+          mkdir -p evidence
+          echo "ASF cycle executed" > evidence/latest-run.txt
+
+      - name: Update state placeholder
+        run: echo "ASF state update initialized"
