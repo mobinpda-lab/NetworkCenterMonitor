@@ -1,6 +1,7 @@
 name: ASF Orchestrator
 
 on:
+  pull_request:
   workflow_dispatch:
   schedule:
     - cron: "*/30 * * * *"
