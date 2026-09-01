@@ -25,6 +25,8 @@ Discoverable fields use `Auto`, `Manual` or `Imported` source semantics. Auto di
 
 There is one vendor-neutral discovery path for Router, Switch, Camera, Recorder, PC and other devices. Discovery supports CIDR and From-To scopes, configurable speed, timeout, retry, rate limits and bounded concurrency. Probe adapters extend the shared engine for ARP, ICMP, TCP, UDP, HTTP, HTTPS, RTSP, ONVIF, hostname, MAC vendor, service fingerprint, vendor APIs, authenticated inventory and Local Agent facts.
 
+Current executable low-cost network adapters include OS reachability/ICMP, bounded explicit TCP connect probes, and HTTP/HTTPS HEAD probes. HTTP/HTTPS discovery honors explicit preset/user ports or falls back to 80/443, does not follow redirects, and treats valid authentication/error HTTP responses as positive service detection because the remote HTTP stack answered. HTTPS keeps platform certificate validation enabled rather than weakening trust checks for discovery. These probes add no persistent entity or settings path; any accepted discovery result continues through the existing canonical import/persistence and Backup/Restore paths.
+
 Discovery results are preview candidates first. Duplicate detection occurs before import. Import is explicit and selective.
 
 ## Camera / Recorder profile boundary
