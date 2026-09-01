@@ -23,7 +23,7 @@ permissions:
   actions: read
   issues: write
 
-aoncurrency:
+concurrency:
   group: ncm-production-orchestrator
   cancel-in-progress: false
 
