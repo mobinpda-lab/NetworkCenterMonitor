@@ -89,17 +89,17 @@ jobs:
               return runs.filter(run => run.name === name).sort((a, b) => b.id - a.id)[0] || null;
             }
 
-            function pullRunMatchesCurrentBase(run, prNumber) {
-              if (run?.event !== 'pull_request') return false;
-              const linked = (run.pull_requests || []).find(p => p.number === prNumber);
-              return linked?.base?.sha === mainSha;
-            }
-
             async function gateIsExactAndGreen(run, prNumber, headSha) {
               if (!run || run.head_sha !== headSha) return false;
               if (run.status !== 'completed' || run.conclusion !== 'success') return false;
-              if (run.event === 'pull_request') return pullRunMatchesCurrentBase(run, prNumber);
-              if (run.event === 'workflow_dispatch') return containsCurrentMain(headSha);
+
+              // GitHub may retain event-time pull_request base metadata even after the
+              // PR head is rebased/merged forward. Exact promotability is therefore
+              // proven by the immutable gate head SHA plus current-main ancestry,
+              // not by the historical base SHA embedded in the workflow event.
+              if (run.event === 'pull_request' || run.event === 'workflow_dispatch') {
+                return containsCurrentMain(headSha);
+              }
               return false;
             }
 

@@ -9,7 +9,8 @@ required_fragments = [
     "AUTO_MARKER = 'NCM-AUTO: TRUE'",
     "run.status !== 'completed' || run.conclusion !== 'success'",
     "run.head_sha !== headSha",
-    "linked?.base?.sha === mainSha",
+    "run.event === 'pull_request' || run.event === 'workflow_dispatch'",
+    "return containsCurrentMain(headSha);",
     "beforeMergeMain.data.commit.sha !== mainSha",
     "locked.head.sha !== headSha",
     "locked.mergeable !== true",
@@ -22,7 +23,12 @@ missing = [fragment for fragment in required_fragments if fragment not in workfl
 if missing:
     raise SystemExit('Missing orchestrator contract fragments:\n- ' + '\n- '.join(missing))
 
-for forbidden in ['force: true', 'git push --force', 'conclusion === \'skipped\'']:
+for forbidden in [
+    'force: true',
+    'git push --force',
+    "conclusion === 'skipped'",
+    'linked?.base?.sha === mainSha',
+]:
     if forbidden in workflow:
         raise SystemExit(f'Forbidden orchestrator behavior found: {forbidden}')
 
