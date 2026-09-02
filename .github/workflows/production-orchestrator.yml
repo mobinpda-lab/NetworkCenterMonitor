@@ -179,11 +179,9 @@ jobs:
                 return;
               }
 
-              // Immediate self-wake removes the normal 5-minute polling gap after
-              // a successful merge. The scheduled trigger remains as a recovery
-              // watchdog; this explicit dispatch is the fast path for the queue.
               core.info(`#${fresh.number}: merged as ${mergedMain}; immediately waking orchestrator for the next queued PR.`);
               await github.rest.actions.createWorkflowDispatch({
                 owner, repo, workflow_id: 'production-orchestrator.yml', ref: 'main',
               });
               return; // serial production promotion: one merge per invocation
+            }
