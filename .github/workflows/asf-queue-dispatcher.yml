@@ -1,0 +1,31 @@
+name: ASF Queue Dispatcher
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+  actions: write
+concurrency:
+  group: ncm-asf-queue
+  cancel-in-progress: false
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Lease next ready task
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const {owner,repo}=context.repo;
+            const issues=await github.paginate(github.rest.issues.listForRepo,{owner,repo,state:'open',labels:'ncm-auto',per_page:100});
+            const ready=issues.filter(i=>!i.pull_request && (i.labels||[]).some(l=>l.name==='ncm-auto') && !(i.labels||[]).some(l=>l.name==='asf-running')).sort((a,b)=>a.number-b.number);
+            if(!ready.length){core.info('No queued NCM task.');return;}
+            const main=(await github.rest.repos.getBranch({owner,repo,branch:'main'})).data.commit.sha;
+            const issue=ready[0];
+            await github.rest.issues.addLabels({owner,repo,issue_number:issue.number,labels:['asf-running']});
+            await github.rest.issues.createComment({owner,repo,issue_number:issue.number,body:`ASF queue leased by continuous dispatcher at main ${main}. Worker launch follows.`});
+            await github.rest.actions.createWorkflowDispatch({owner,repo,workflow_id:'asf-code-worker.yml',ref:'main',inputs:{issue_number:String(issue.number),expected_main_sha:main}});
+            core.notice(`Dispatched issue #${issue.number} at ${main}`);
