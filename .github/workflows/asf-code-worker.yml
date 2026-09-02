@@ -1,0 +1,68 @@
+name: ASF Code Worker
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue to implement
+        required: true
+        type: string
+      expected_main_sha:
+        description: Main SHA leased by queue
+        required: true
+        type: string
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+concurrency:
+  group: ncm-asf-code-worker-${{ inputs.issue_number }}
+  cancel-in-progress: false
+jobs:
+  code-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      ASF_ISSUE_NUMBER: ${{ inputs.issue_number }}
+      EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6' }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify leased main
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_MAIN_SHA"
+      - name: Configure git
+        run: |
+          git config user.name 'ncm-asf[bot]'
+          git config user.email 'ncm-asf[bot]@users.noreply.github.com'
+      - name: Generate, test and self-fix
+        run: python3 .github/asf/code-worker.py
+      - name: Commit and push
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git diff --quiet; then echo 'changed=false' >> "$GITHUB_OUTPUT"; exit 0; fi
+          BRANCH="asf/issue-${ASF_ISSUE_NUMBER}"
+          git switch -C "$BRANCH"
+          git add -A
+          git commit -m "feat(asf-worker): implement issue #${ASF_ISSUE_NUMBER}"
+          git push --force-with-lease origin "$BRANCH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+      - name: Create or reuse draft PR
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="${{ steps.commit.outputs.branch }}"
+          PR=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --base main --state open --json number --jq '.[0].number')
+          if [ -z "$PR" ]; then
+            URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --draft --head "$BRANCH" --base main --title "ASF Worker: issue #${ASF_ISSUE_NUMBER}" --body "Autonomous bounded Code Worker output for #${ASF_ISSUE_NUMBER}. Production Orchestrator remains the sole merge authority.")
+            PR="${URL##*/}"
+          fi
+          gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-label ncm-auto
+          gh issue comment "$ASF_ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "ASF Code Worker produced PR #$PR. Awaiting exact-head gates and Production Orchestrator."
+          gh workflow run production-orchestrator.yml --repo "$GITHUB_REPOSITORY" --ref main -f pr_number="$PR"
