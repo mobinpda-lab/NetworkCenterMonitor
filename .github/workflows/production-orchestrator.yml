@@ -186,5 +186,4 @@ jobs:
               await github.rest.actions.createWorkflowDispatch({
                 owner, repo, workflow_id: 'production-orchestrator.yml', ref: 'main',
               });
-              return;
-            }
+              return; // serial production promotion: one merge per invocation
