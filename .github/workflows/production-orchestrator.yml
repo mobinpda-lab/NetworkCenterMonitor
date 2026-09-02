@@ -92,11 +92,6 @@ jobs:
             async function gateIsExactAndGreen(run, prNumber, headSha) {
               if (!run || run.head_sha !== headSha) return false;
               if (run.status !== 'completed' || run.conclusion !== 'success') return false;
-
-              // GitHub may retain event-time pull_request base metadata even after the
-              // PR head is rebased/merged forward. Exact promotability is therefore
-              // proven by the immutable gate head SHA plus current-main ancestry,
-              // not by the historical base SHA embedded in the workflow event.
               if (run.event === 'pull_request' || run.event === 'workflow_dispatch') {
                 return containsCurrentMain(headSha);
               }
@@ -169,8 +164,26 @@ jobs:
               }
 
               core.info(`#${fresh.number}: exact-head CI/Device/Security green on current main; squash merging.`);
-              await github.rest.pulls.merge({
+              const result = await github.rest.pulls.merge({
                 owner, repo, pull_number: fresh.number, merge_method: 'squash', sha: headSha,
               });
+              if (!result.data.merged) {
+                core.warning(`#${fresh.number}: merge rejected: ${result.data.message}`);
+                continue;
+              }
+
+              const mergedMain = result.data.sha;
+              const verifiedMain = await github.rest.repos.getBranch({ owner, repo, branch: 'main' });
+              if (verifiedMain.data.commit.sha !== mergedMain) {
+                core.setFailed(`#${fresh.number}: merged SHA ${mergedMain} is not current main; stopping fail-closed.`);
+                return;
+              }
+
+              // Immediate self-wake removes the normal 5-minute polling gap after
+              // a successful merge. The scheduled trigger remains as a recovery
+              // watchdog; this explicit dispatch is the fast path for the queue.
+              core.info(`#${fresh.number}: merged as ${mergedMain}; immediately waking orchestrator for the next queued PR.`);
+              await github.rest.actions.createWorkflowDispatch({
+                owner, repo, workflow_id: 'production-orchestrator.yml', ref: 'main',
+              });
               return; // serial production promotion: one merge per invocation
-            }
