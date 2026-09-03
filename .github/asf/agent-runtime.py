@@ -37,7 +37,7 @@ def lease(issue_number):
         if marker in body:
             match = re.search(r"expires=(\d+)", body)
             if match and int(match.group(1)) > now:
-                raise RuntimeError(f"active worker lease already exists for issue #{issue_number}")
+                return
     post_comment(issue_number, f"{marker}\nworker={os.getenv('GITHUB_RUN_ID','unknown')}\nexpires={now + LEASE_SECONDS}\nstatus=RUNNING")
 
 def openai_response(prompt, timeout_seconds):
