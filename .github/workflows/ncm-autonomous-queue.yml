@@ -1,0 +1,62 @@
+name: NCM Autonomous Task Queue
+
+on:
+  issues:
+    types: [opened, reopened, labeled, unlabeled]
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: ncm-autonomous-task-queue
+  cancel-in-progress: false
+
+jobs:
+  route:
+    name: lease-and-dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Lease and dispatch eligible NCM tasks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const blocked = new Set(['do-not-merge','orchestrator:hold','orchestrator:manual','factory:blocked','factory:escalated']);
+            const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
+            const candidates = issues
+              .filter(i => !i.pull_request)
+              .map(i => ({ issue: i, labels: new Set((i.labels || []).map(x => typeof x === 'string' ? x : x.name)) }))
+              .filter(x => (x.issue.body || '').includes('NCM-AUTO: TRUE') || x.labels.has('ncm-auto'))
+              .filter(x => ![...blocked].some(l => x.labels.has(l)))
+              .filter(x => !x.labels.has('factory:leased') && !x.labels.has('factory:in-progress'))
+              .sort((a,b) => {
+                const rank = s => s.has('priority:release-blocker') ? 0 : s.has('priority:core') ? 1 : s.has('priority:automation') ? 2 : 3;
+                return rank(a.labels) - rank(b.labels) || a.issue.number - b.issue.number;
+              });
+            if (!candidates.length) { core.info('No eligible NCM autonomous task.'); return; }
+            const main = await github.rest.repos.getBranch({ owner, repo, branch: 'main' });
+            for (const item of candidates.slice(0, 3)) {
+              const number = item.issue.number;
+              const labelsNow = new Set((await github.rest.issues.get({ owner, repo, issue_number: number })).data.labels.map(x => typeof x === 'string' ? x : x.name));
+              if (labelsNow.has('factory:leased') || labelsNow.has('factory:in-progress')) continue;
+              await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: ['factory:leased','factory:in-progress'] });
+              await github.rest.issues.createComment({ owner, repo, issue_number: number, body: `<!-- ncm-autonomous-lease -->\nNCM Queue leased issue #${number} against exact main ${main.data.commit.sha}.` });
+              try {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner, repo, workflow_id: 'autonomous-code-worker.yml', ref: 'main',
+                  inputs: { issue_number: String(number), expected_main_sha: main.data.commit.sha }
+                });
+                await github.rest.issues.createComment({ owner, repo, issue_number: number, body: `<!-- ncm-autonomous-dispatch -->\nCode Worker dispatched for #${number}; exact-main lease=${main.data.commit.sha}.` });
+              } catch (error) {
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: 'factory:leased' }).catch(() => {});
+                await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: 'factory:in-progress' }).catch(() => {});
+                await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: ['factory:blocked'] });
+                await github.rest.issues.createComment({ owner, repo, issue_number: number, body: `NCM Queue dispatch failed closed: ${error.message}` });
+              }
+            }
