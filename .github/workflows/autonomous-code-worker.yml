@@ -1,0 +1,95 @@
+name: NCM Autonomous Code Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: GitHub Issue number to implement
+        required: true
+        type: string
+      expected_main_sha:
+        description: Exact main SHA leased by the queue
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: ncm-code-worker-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  code-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5.6' }}
+      ASF_MAX_FIX_ATTEMPTS: '3'
+      ASF_PROVIDER_TIMEOUT_SECONDS: '180'
+      ASF_PROVIDER_BUDGET_SECONDS: '540'
+      ASF_LEASE_SECONDS: '1800'
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Validate exact main lease
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          test -n "$EXPECTED_MAIN_SHA"
+          test "$actual" = "$EXPECTED_MAIN_SHA"
+
+      - name: Select issue-scoped worker branch
+        run: |
+          set -euo pipefail
+          branch="ai/issue-${ISSUE_NUMBER}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "$branch"
+            git switch -C "$branch" "origin/$branch"
+            git merge-base --is-ancestor "origin/main" HEAD || { echo 'Worker branch is stale against current main; fail closed.'; exit 8; }
+          else
+            git switch -c "$branch"
+          fi
+          echo "WORKER_BRANCH=$branch" >> "$GITHUB_ENV"
+
+      - name: Generate, test and self-fix
+        env:
+          NCM_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          NCM_EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+        run: python3 .github/asf/agent-runtime.py
+
+      - name: Commit worker result
+        run: |
+          set -euo pipefail
+          git diff --quiet && { echo 'Worker produced no change.'; exit 1; }
+          git add -A
+          git commit -m "feat(ai-worker): implement issue #${ISSUE_NUMBER}"
+
+      - name: Push issue branch
+        run: git push origin "HEAD:${WORKER_BRANCH}"
+
+      - name: Create or reuse guarded draft PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$WORKER_BRANCH" --base main --state open --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then pr="$existing"; else pr_url="$(gh pr create --repo "$GITHUB_REPOSITORY" --draft --head "$WORKER_BRANCH" --base main --title "AI Worker: issue #${ISSUE_NUMBER}" --body "Bounded autonomous Code Worker result for #${ISSUE_NUMBER}. Exact-head CI, Device Smoke and Security gates remain required.")"; pr="${pr_url##*/}"; fi
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "<!-- ncm-worker-output -->\nCode Worker produced/updated PR #${pr} from exact leased main ${EXPECTED_MAIN_SHA}."
+          echo "PR_NUMBER=$pr" >> "$GITHUB_ENV"
+
+      - name: Wake canonical promotion gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run production-orchestrator.yml --repo "$GITHUB_REPOSITORY" --ref main -f pr_number="$PR_NUMBER"
