@@ -1,6 +1,8 @@
 name: ASF Watchdog
 
 on:
+  issues:
+    types: [opened, reopened, labeled, unlabeled]
   pull_request:
     paths:
       - '.github/workflows/asf-orchestrator.yml'
@@ -18,8 +20,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  queue:
+    name: autonomous-code-queue
+    if: ${{ github.event_name == 'issues' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Lease and dispatch opted-in tasks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
+            const blocked = ['do-not-merge', 'orchestrator:hold', 'orchestrator:manual', 'factory:blocked', 'factory:escalated'];
+            const candidates = issues.filter(issue => {
+              if (issue.pull_request) return false;
+              const labels = new Set((issue.labels || []).map(l => l.name));
+              return (issue.body || '').includes('NCM-AUTO: TRUE') && !blocked.some(x => labels.has(x));
+            });
+            if (!candidates.length) { core.info('No opted-in NCM task found.'); return; }
+            const main = await github.rest.repos.getBranch({ owner, repo, branch: 'main' });
+            for (const task of candidates.slice(0, 3)) {
+              const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: task.number, per_page: 100 });
+              const leaseMarker = '<!-- ncm-worker-lease -->';
+              const dispatchMarker = '<!-- ncm-worker-dispatch -->';
+              if (comments.some(c => (c.body || '').includes(dispatchMarker))) continue;
+              if (comments.some(c => (c.body || '').includes(leaseMarker))) continue;
+              await github.rest.issues.createComment({ owner, repo, issue_number: task.number, body: `${leaseMarker}\nmain=${main.data.commit.sha}\nworker=queued` });
+              try {
+                await github.rest.actions.createWorkflowDispatch({ owner, repo, workflow_id: 'autonomous-code-worker.yml', ref: 'main', inputs: { issue_number: String(task.number), expected_main_sha: main.data.commit.sha } });
+                await github.rest.issues.createComment({ owner, repo, issue_number: task.number, body: `${dispatchMarker}\nCode Worker dispatched for issue #${task.number} at exact main ${main.data.commit.sha}.` });
+              } catch (error) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: task.number, body: `Code Worker dispatch failed closed: ${error.message}` });
+              }
+            }
+
   watchdog:
     name: canonical-production-watchdog
+    if: ${{ github.event_name != 'issues' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -39,43 +77,14 @@ jobs:
             const { owner, repo } = context.repo;
             const workflowId = 'production-orchestrator.yml';
             const now = Date.now();
-
             const main = await github.rest.repos.getBranch({ owner, repo, branch: 'main' });
             const mainSha = main.data.commit.sha;
-            core.info(`Current main: ${mainSha}`);
-
-            const runs = await github.paginate(
-              github.rest.actions.listWorkflowRunsForRepo,
-              { owner, repo, workflow_id: workflowId, per_page: 50 },
-            );
-
-            const sameHead = runs
-              .filter(run => run.head_sha === mainSha)
-              .sort((a, b) => b.id - a.id);
-            const active = sameHead.find(run => ['queued', 'in_progress', 'waiting', 'requested', 'pending'].includes(run.status));
-            const recentSuccess = sameHead.find(run =>
-              run.status === 'completed' &&
-              run.conclusion === 'success' &&
-              now - Date.parse(run.updated_at) <= 15 * 60 * 1000
-            );
-
-            if (active) {
-              core.info(`Canonical Production Orchestrator already active: ${active.id}; no duplicate wakeup.`);
-              return;
-            }
-
-            if (recentSuccess) {
-              core.info(`Canonical Production Orchestrator is healthy: ${recentSuccess.id}; no wakeup required.`);
-              return;
-            }
-
-            core.warning(`No recent successful Production Orchestrator run for main ${mainSha}. Waking canonical controller.`);
-            await github.rest.actions.createWorkflowDispatch({
-              owner,
-              repo,
-              workflow_id: workflowId,
-              ref: 'main',
-            });
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo, { owner, repo, workflow_id: workflowId, per_page: 50 });
+            const sameHead = runs.filter(run => run.head_sha === mainSha).sort((a,b) => b.id-a.id);
+            const active = sameHead.find(run => ['queued','in_progress','waiting','requested','pending'].includes(run.status));
+            const recentSuccess = sameHead.find(run => run.status === 'completed' && run.conclusion === 'success' && now - Date.parse(run.updated_at) <= 15*60*1000);
+            if (active || recentSuccess) return;
+            await github.rest.actions.createWorkflowDispatch({ owner, repo, workflow_id: workflowId, ref: 'main' });
             core.notice(`Production Orchestrator dispatched for main ${mainSha}.`);
 
       - name: Record watchdog result
@@ -83,4 +92,4 @@ jobs:
           mkdir -p evidence
           printf 'ASF Watchdog executed at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > evidence/latest-watchdog.txt
           printf 'Canonical controller: .github/workflows/production-orchestrator.yml\n' >> evidence/latest-watchdog.txt
-          printf 'Policy: watchdog never merges, never bypasses gates, and never creates a second promotion controller.\n' >> evidence/latest-watchdog.txt
+          printf 'Policy: watchdog/queue never merges, never bypasses gates, and never creates a second promotion controller.\n' >> evidence/latest-watchdog.txt
