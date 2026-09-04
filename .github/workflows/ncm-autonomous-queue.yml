@@ -42,19 +42,30 @@ jobs:
 
             const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
 
-            // Recovery: a lease without a fresh dispatch/completion event is stale after 5 minutes.
+            // Recovery: a lease is stale after 5 minutes only when no fresh worker heartbeat/progress/completion evidence exists.
             for (const issue of issues.filter(i => !i.pull_request)) {
               const labels = new Set((issue.labels || []).map(x => typeof x === 'string' ? x : x.name));
               if (!labels.has('factory:leased')) continue;
               const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: issue.number, per_page: 100 });
               const lease = [...comments].reverse().find(c => String(c.body || '').includes('<!-- ncm-autonomous-lease -->'));
               if (!lease) continue;
-              const age = now - new Date(lease.created_at).getTime();
+              const controlComments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: controlIssue, per_page: 100 });
+              const evidence = [...controlComments].reverse().find(c => {
+                const body = String(c.body || '');
+                if (!body.includes('<!-- asf-event ')) return false;
+                try {
+                  const match = body.match(/```json\n([\s\S]*?)\n```/);
+                  const record = match ? JSON.parse(match[1]) : null;
+                  return record && Number(record.issue) === issue.number && ['WORKER_HEARTBEAT','WORKER_PROGRESS','WORKER_COMPLETED','WORKER_FAILED'].includes(record.event);
+                } catch (_) { return false; }
+              });
+              const lastActivity = evidence ? new Date(evidence.created_at).getTime() : new Date(lease.created_at).getTime();
+              const age = now - lastActivity;
               if (age <= leaseTtl * 1000) continue;
               await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: 'factory:leased' }).catch(() => {});
               await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: 'factory:in-progress' }).catch(() => {});
-              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: `<!-- ncm-autonomous-recovery -->\nStale lease recovered after ${Math.floor(age / 1000)}s; task returned to queue.` });
-              await event('LEASE_RECOVERED', { issue: issue.number, lease_age_seconds: Math.floor(age / 1000) });
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: `<!-- ncm-autonomous-recovery -->\nStale lease recovered after ${Math.floor(age / 1000)}s without fresh worker heartbeat/progress evidence; task returned to queue.` });
+              await event('LEASE_RECOVERED', { issue: issue.number, inactivity_seconds: Math.floor(age / 1000) });
             }
 
             const freshIssues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
