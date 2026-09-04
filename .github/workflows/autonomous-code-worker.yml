@@ -22,6 +22,9 @@ concurrency:
   group: ncm-code-worker-${{ inputs.issue_number }}
   cancel-in-progress: false
 
+env:
+  CONTROL_PLANE_ISSUE: '84'
+
 jobs:
   code-worker:
     runs-on: ubuntu-latest
@@ -37,6 +40,17 @@ jobs:
       ASF_LEASE_SECONDS: '1800'
       GITHUB_TOKEN: ${{ github.token }}
     steps:
+      - name: Register worker start
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = Number(process.env.ISSUE_NUMBER);
+            const control = Number(process.env.CONTROL_PLANE_ISSUE);
+            const record = { schema_version: 1, event: 'WORKER_STARTED', ts: new Date().toISOString(), actor: `ncm-worker-${issue}`, issue, run_id: context.runId, expected_main_sha: process.env.EXPECTED_MAIN_SHA };
+            await github.rest.issues.createComment({ owner, repo, issue_number: control, body: `<!-- asf-event WORKER_STARTED -->\n\`\`\`json\n${JSON.stringify(record)}\n\`\`\`` });
+            await github.rest.issues.createComment({ owner, repo, issue_number: issue, body: `<!-- ncm-worker-start -->\nWorker run ${context.runId} started; exact-main=${process.env.EXPECTED_MAIN_SHA}.` });
+
       - name: Checkout current main
         uses: actions/checkout@v4
         with:
@@ -93,3 +107,36 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run production-orchestrator.yml --repo "$GITHUB_REPOSITORY" --ref main -f pr_number="$PR_NUMBER"
+
+      - name: Publish worker completion and release lease
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          WORKER_STATUS: ${{ job.status }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = Number(process.env.ISSUE_NUMBER);
+            const control = Number(process.env.CONTROL_PLANE_ISSUE);
+            const status = process.env.WORKER_STATUS;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: issue, per_page: 100 });
+            const failures = comments.filter(c => String(c.body || '').includes('<!-- ncm-worker-start -->') && String(c.body || '').includes('Worker run')).length;
+            const record = { schema_version: 1, event: status === 'success' ? 'WORKER_COMPLETED' : 'WORKER_FAILED', ts: new Date().toISOString(), actor: `ncm-worker-${issue}`, issue, run_id: context.runId, status, expected_main_sha: process.env.EXPECTED_MAIN_SHA, attempt: failures };
+            await github.rest.issues.createComment({ owner, repo, issue_number: control, body: `<!-- asf-event ${record.event} -->\n\`\`\`json\n${JSON.stringify(record)}\n\`\`\`` });
+            if (status === 'success') {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue, name: 'factory:leased' }).catch(() => {});
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue, name: 'factory:in-progress' }).catch(() => {});
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue, body: `<!-- ncm-worker-complete -->\nWorker completed successfully in run ${context.runId}; lease released after guarded PR handoff.` });
+            } else if (failures < 3) {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue, name: 'factory:leased' }).catch(() => {});
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue, name: 'factory:in-progress' }).catch(() => {});
+              await github.rest.issues.addLabels({ owner, repo, issue_number: issue, labels: ['factory:retry'] });
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue, body: `<!-- ncm-worker-retry -->\nWorker failed in run ${context.runId}; bounded retry ${failures}/3 returned task to queue.` });
+            } else {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue, name: 'factory:leased' }).catch(() => {});
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue, name: 'factory:in-progress' }).catch(() => {});
+              await github.rest.issues.addLabels({ owner, repo, labels: ['factory:escalated'] }).catch(() => {});
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue, body: `<!-- ncm-worker-escalated -->\nWorker exhausted bounded recovery attempts; fail-closed escalation.` });
+            }
