@@ -18,7 +18,7 @@ concurrency:
 
 env:
   CONTROL_PLANE_ISSUE: '84'
-  LEASE_TTL_SECONDS: '1800'
+  LEASE_TTL_SECONDS: '300'
 
 jobs:
   route:
@@ -42,7 +42,7 @@ jobs:
 
             const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
 
-            // Recovery: a lease without a fresh dispatch/completion event is stale after TTL.
+            // Recovery: a lease without a fresh dispatch/completion event is stale after 5 minutes.
             for (const issue of issues.filter(i => !i.pull_request)) {
               const labels = new Set((issue.labels || []).map(x => typeof x === 'string' ? x : x.name));
               if (!labels.has('factory:leased')) continue;
