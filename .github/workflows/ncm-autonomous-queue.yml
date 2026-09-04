@@ -16,20 +16,60 @@ concurrency:
   group: ncm-autonomous-task-queue
   cancel-in-progress: false
 
+env:
+  CONTROL_PLANE_ISSUE: '84'
+  LEASE_TTL_SECONDS: '300'
+
 jobs:
   route:
     name: lease-and-dispatch
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Lease and dispatch eligible NCM tasks
+      - name: Lease, recover stale work and dispatch eligible NCM tasks
         uses: actions/github-script@v7
         with:
           script: |
             const { owner, repo } = context.repo;
+            const controlIssue = Number(process.env.CONTROL_PLANE_ISSUE);
+            const leaseTtl = Number(process.env.LEASE_TTL_SECONDS);
+            const now = Date.now();
             const blocked = new Set(['do-not-merge','orchestrator:hold','orchestrator:manual','factory:blocked','factory:escalated']);
+            const event = async (type, payload) => {
+              const record = { schema_version: 1, event: type, ts: new Date().toISOString(), actor: 'ncm-autonomous-queue', ...payload };
+              await github.rest.issues.createComment({ owner, repo, issue_number: controlIssue, body: `<!-- asf-event ${type} -->\n\`\`\`json\n${JSON.stringify(record)}\n\`\`\`` });
+            };
+
             const issues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
-            const candidates = issues
+
+            // Recovery: a lease is stale after 5 minutes only when no fresh worker heartbeat/progress/completion evidence exists.
+            for (const issue of issues.filter(i => !i.pull_request)) {
+              const labels = new Set((issue.labels || []).map(x => typeof x === 'string' ? x : x.name));
+              if (!labels.has('factory:leased')) continue;
+              const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: issue.number, per_page: 100 });
+              const lease = [...comments].reverse().find(c => String(c.body || '').includes('<!-- ncm-autonomous-lease -->'));
+              if (!lease) continue;
+              const controlComments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: controlIssue, per_page: 100 });
+              const evidence = [...controlComments].reverse().find(c => {
+                const body = String(c.body || '');
+                if (!body.includes('<!-- asf-event ')) return false;
+                try {
+                  const match = body.match(/```json\n([\s\S]*?)\n```/);
+                  const record = match ? JSON.parse(match[1]) : null;
+                  return record && Number(record.issue) === issue.number && ['WORKER_HEARTBEAT','WORKER_PROGRESS','WORKER_COMPLETED','WORKER_FAILED'].includes(record.event);
+                } catch (_) { return false; }
+              });
+              const lastActivity = evidence ? new Date(evidence.created_at).getTime() : new Date(lease.created_at).getTime();
+              const age = now - lastActivity;
+              if (age <= leaseTtl * 1000) continue;
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: 'factory:leased' }).catch(() => {});
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: 'factory:in-progress' }).catch(() => {});
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: `<!-- ncm-autonomous-recovery -->\nStale lease recovered after ${Math.floor(age / 1000)}s without fresh worker heartbeat/progress evidence; task returned to queue.` });
+              await event('LEASE_RECOVERED', { issue: issue.number, inactivity_seconds: Math.floor(age / 1000) });
+            }
+
+            const freshIssues = await github.paginate(github.rest.issues.listForRepo, { owner, repo, state: 'open', per_page: 100 });
+            const candidates = freshIssues
               .filter(i => !i.pull_request)
               .map(i => ({ issue: i, labels: new Set((i.labels || []).map(x => typeof x === 'string' ? x : x.name)) }))
               .filter(x => (x.issue.body || '').includes('NCM-AUTO: TRUE') || x.labels.has('ncm-auto'))
@@ -39,24 +79,29 @@ jobs:
                 const rank = s => s.has('priority:release-blocker') ? 0 : s.has('priority:core') ? 1 : s.has('priority:automation') ? 2 : 3;
                 return rank(a.labels) - rank(b.labels) || a.issue.number - b.issue.number;
               });
-            if (!candidates.length) { core.info('No eligible NCM autonomous task.'); return; }
+
             const main = await github.rest.repos.getBranch({ owner, repo, branch: 'main' });
+            await event('QUEUE_RECONCILED', { main_sha: main.data.commit.sha, eligible: candidates.length, capacity: Math.min(3, candidates.length) });
             for (const item of candidates.slice(0, 3)) {
               const number = item.issue.number;
-              const labelsNow = new Set((await github.rest.issues.get({ owner, repo, issue_number: number })).data.labels.map(x => typeof x === 'string' ? x : x.name));
+              const current = (await github.rest.issues.get({ owner, repo, issue_number: number })).data;
+              const labelsNow = new Set((current.labels || []).map(x => typeof x === 'string' ? x : x.name));
               if (labelsNow.has('factory:leased') || labelsNow.has('factory:in-progress')) continue;
               await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: ['factory:leased','factory:in-progress'] });
               await github.rest.issues.createComment({ owner, repo, issue_number: number, body: `<!-- ncm-autonomous-lease -->\nNCM Queue leased issue #${number} against exact main ${main.data.commit.sha}.` });
+              await event('TASK_LEASED', { issue: number, main_sha: main.data.commit.sha, worker_slot: `ncm-worker-${number}` });
               try {
                 await github.rest.actions.createWorkflowDispatch({
                   owner, repo, workflow_id: 'autonomous-code-worker.yml', ref: 'main',
                   inputs: { issue_number: String(number), expected_main_sha: main.data.commit.sha }
                 });
                 await github.rest.issues.createComment({ owner, repo, issue_number: number, body: `<!-- ncm-autonomous-dispatch -->\nCode Worker dispatched for #${number}; exact-main lease=${main.data.commit.sha}.` });
+                await event('WORKER_DISPATCHED', { issue: number, main_sha: main.data.commit.sha });
               } catch (error) {
                 await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: 'factory:leased' }).catch(() => {});
                 await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: 'factory:in-progress' }).catch(() => {});
                 await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: ['factory:blocked'] });
                 await github.rest.issues.createComment({ owner, repo, issue_number: number, body: `NCM Queue dispatch failed closed: ${error.message}` });
+                await event('DISPATCH_FAILED', { issue: number, error: String(error.message) });
               }
             }
