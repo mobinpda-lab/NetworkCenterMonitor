@@ -37,7 +37,7 @@ jobs:
       ASF_MAX_FIX_ATTEMPTS: '3'
       ASF_PROVIDER_TIMEOUT_SECONDS: '180'
       ASF_PROVIDER_BUDGET_SECONDS: '540'
-      ASF_LEASE_SECONDS: '1800'
+      ASF_LEASE_SECONDS: '300'
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Register worker start
@@ -77,11 +77,23 @@ jobs:
           fi
           echo "WORKER_BRANCH=$branch" >> "$GITHUB_ENV"
 
-      - name: Generate, test and self-fix
+      - name: Generate, test and self-fix with heartbeat
         env:
           NCM_ISSUE_NUMBER: ${{ inputs.issue_number }}
           NCM_EXPECTED_MAIN_SHA: ${{ inputs.expected_main_sha }}
-        run: python3 .github/asf/agent-runtime.py
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          heartbeat() {
+            while sleep 60; do
+              gh api "repos/${GITHUB_REPOSITORY}/issues/${CONTROL_PLANE_ISSUE}/comments" \
+                -f body="<!-- asf-event WORKER_HEARTBEAT -->\n\`\`\`json\n{\"schema_version\":1,\"event\":\"WORKER_HEARTBEAT\",\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"actor\":\"ncm-worker-${ISSUE_NUMBER}\",\"issue\":${ISSUE_NUMBER},\"run_id\":${GITHUB_RUN_ID},\"stage\":\"generate-test-self-fix\"}\n\`\`\`" >/dev/null
+            done
+          }
+          heartbeat &
+          heartbeat_pid=$!
+          trap 'kill "$heartbeat_pid" 2>/dev/null || true' EXIT
+          python3 .github/asf/agent-runtime.py
 
       - name: Commit worker result
         run: |
