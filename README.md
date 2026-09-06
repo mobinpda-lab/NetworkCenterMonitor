@@ -17,8 +17,8 @@
 - Remote Access با اولویت LAN/Private Network
 
 ## اصول کلیدی
-- UI فارسی RTL با Vazirmatn
-- گزارش/PDF/Print با Vazirmatn UI FD
+- UI فارسی RTL با **Vazirharf (وزیرحرف)** به‌عنوان فونت استاندارد پروژه
+- گزارش/PDF/Print نیز باید از **Vazirharf** استفاده کند؛ Vazirmatn دیگر فونت استاندارد پروژه نیست
 - سبز=وصل، قرمز=قطع، نارنجی=هشدار، بنفش=پیگیری، خاکستری=غیرفعال/نامشخص
 - Ping/ICMP مستقل از Port Monitoring
 - اطلاعات Auto/Manual/Imported منبع‌گذاری می‌شوند و داده Manual بدون تأیید کاربر بازنویسی نمی‌شود
