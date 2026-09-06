@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download Vazirharf v34.002
         shell: bash
@@ -35,10 +37,12 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin feature/vazirharf-standard
+          git rebase origin/feature/vazirharf-standard
           git add app/src/main/res/font/vazirharf_*.ttf
           if git diff --cached --quiet; then
             echo "Vazirharf assets already synchronized."
             exit 0
           fi
           git commit -m "chore(font): sync Vazirharf v34.002 [skip ci]"
-          git push
+          git push origin HEAD:feature/vazirharf-standard
