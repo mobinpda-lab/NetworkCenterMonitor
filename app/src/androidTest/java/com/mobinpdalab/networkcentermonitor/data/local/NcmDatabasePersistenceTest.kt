@@ -92,6 +92,110 @@ class NcmDatabasePersistenceTest {
         }
     }
 
+    @Test
+    fun specializedProfiles_survive_closeAndReopen_andReferenceCanonicalDeviceIdentity() = runBlocking {
+        val first = openDatabase()
+        val dao = first.canonicalDao()
+        dao.upsertCenter(CenterEntity("center-1", "province-1", "Test Center"))
+        dao.upsertNetwork(
+            NetworkEntity(
+                id = "network-1",
+                centerId = "center-1",
+                name = "Test Network",
+                type = "LAN",
+                accessMethod = "STATIC",
+                monitoringEnabled = true,
+                discoveryEnabled = true,
+            ),
+        )
+
+        val camera = DeviceEntity(
+            id = "camera-device-1",
+            centerId = "center-1",
+            networkId = "network-1",
+            displayName = "Camera 1",
+            type = "CAMERA",
+            monitoringEnabled = true,
+            status = "UP",
+        )
+        val recorder = DeviceEntity(
+            id = "recorder-device-1",
+            centerId = "center-1",
+            networkId = "network-1",
+            displayName = "Recorder 1",
+            type = "NVR",
+            monitoringEnabled = true,
+            status = "UP",
+        )
+        val pc = DeviceEntity(
+            id = "pc-device-1",
+            centerId = "center-1",
+            networkId = "network-1",
+            displayName = "PC 1",
+            type = "PC",
+            monitoringEnabled = true,
+            status = "UP",
+        )
+        dao.upsertDevice(camera)
+        dao.upsertDevice(recorder)
+        dao.upsertDevice(pc)
+
+        dao.upsertCameraProfile(
+            CameraProfileEntity(
+                id = "camera-profile-1",
+                deviceId = camera.id,
+                environmentName = "Entrance",
+                cameraType = "DOME",
+                recorderDeviceId = recorder.id,
+                channelNumber = 1,
+                capabilities = "ONVIF,RTSP",
+            ),
+        )
+        dao.upsertRecorderProfile(
+            RecorderProfileEntity(
+                id = "recorder-profile-1",
+                deviceId = recorder.id,
+                recordingSupported = true,
+                hddHealthSupported = true,
+                onvifProfiles = "S,T",
+            ),
+        )
+        dao.upsertPcProfile(
+            PcProfileEntity(
+                id = "pc-profile-1",
+                deviceId = pc.id,
+            ),
+        )
+        first.close()
+
+        val second = openDatabase()
+        try {
+            assertEquals(camera.id, profileDeviceId(second, "camera_profiles", "camera-profile-1"))
+            assertEquals(recorder.id, profileDeviceId(second, "recorder_profiles", "recorder-profile-1"))
+            assertEquals(pc.id, profileDeviceId(second, "pc_profiles", "pc-profile-1"))
+
+            assertNotNull(second.canonicalDao().getDevice(camera.id))
+            assertNotNull(second.canonicalDao().getDevice(recorder.id))
+            assertNotNull(second.canonicalDao().getDevice(pc.id))
+        } finally {
+            second.close()
+        }
+    }
+
+    private fun profileDeviceId(
+        database: NcmDatabase,
+        table: String,
+        profileId: String,
+    ): String? {
+        require(table in setOf("camera_profiles", "recorder_profiles", "pc_profiles"))
+        database.openHelper.readableDatabase.query(
+            "SELECT deviceId FROM $table WHERE id = ?",
+            arrayOf(profileId),
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }
+
     private fun openDatabase(): NcmDatabase = Room.databaseBuilder(
         context,
         NcmDatabase::class.java,
